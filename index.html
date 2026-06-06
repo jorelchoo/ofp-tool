@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>OFP Briefing Tool</title>
+
+  <style>
+    body {
+      font-family: Calibri, sans-serif;
+      margin: 40px;
+      background: #f6f7fb;
+    }
+
+    .drop-zone {
+      border: 2px dashed #999;
+      padding: 40px;
+      text-align: center;
+      border-radius: 12px;
+      background: white;
+      margin-bottom: 20px;
+    }
+
+    .drop-zone.dragover {
+      border-color: #333;
+      background: #f0f0f0;
+    }
+
+    .container {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      width: 100%;
+      align-items: stretch;
+    }
+
+    .card {
+      background: white;
+      padding: 16px;
+      border-radius: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+      margin-bottom: 15px;
+    }
+
+    .title {
+      font-size: 22px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #666;
+      margin-bottom: 8px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      row-gap: 6px;
+      font-size: 18px;
+    }
+
+    .dashboard {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      padding: 12px;
+      background: #0b0f14; /* cockpit dark */
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 80px 80px 1fr;
+      gap: 10px;
+      padding: 2px 0;
+    }
+  </style>
+</head>
+
+<body>
+
+<h1>OFP Briefing Tool</h1>
+
+<div id="dropZone" class="drop-zone">
+  Drag & drop OFP PDF here<br><br>
+  <input type="file" id="fileInput" accept="application/pdf">
+</div>
+
+<div id="output"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+const fileInput = document.getElementById("fileInput");
+const dropZone = document.getElementById("dropZone");
+const output = document.getElementById("output");
+
+function formatMinutes(mins) {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h ${m.toString().padStart(2, "0")}m`;
+}
+
+async function extractData(file) {
+  const buffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+
+  let text = "";
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map(i => i.str).join(" ") + " ";
+  }
+
+  text = text.replace(/\s+/g, " ");
+
+  // -------------------------
+  // AIRPORT PAIR (HEADER)
+  // -------------------------
+  const airportPairMatch =
+    text.match(/\b([A-Z]{4})\/[A-Z0-9]{1,3}\b.*?\b([A-Z]{4})\/[A-Z0-9]{1,3}\b/);
+
+  let headerDep = "Not found";
+  let headerArr = "Not found";
+
+  if (airportPairMatch) {
+    headerDep = airportPairMatch[1];
+    headerArr = airportPairMatch[2];
+  }
+
+  // -------------------------
+  // FLIGHT INFO
+  // -------------------------
+  const flight = text.match(/\bSIA\s*\d{1,4}\b/i)?.[0] || "Not found";
+  const reg = text.match(/\b9V[-\s]?[A-Z0-9]{3}\b/i)?.[0] || "Not found";
+
+  const apdMatch = text.match(/\bAPD\b\s*([0-9]{1,3}(?:\.[0-9])?)\s*PCT/i);
+  const apd = apdMatch ? apdMatch[1] + "%" : "Not found";
+
+  const dep = text.match(/\bSCHED\s*DEP\b\s*[:\-]?\s*([0-2]\d{3})/i)?.[1] || "Not found";
+  const arr = text.match(/\bSCHED\s*ARR\b\s*[:\-]?\s*([0-2]\d{3})/i)?.[1] || "Not found";
+
+  // -------------------------
+  // FLIGHT TIME (BURNOFF)
+  // -------------------------
+  let flightTime = "Not found";
+  const burnoffMatch = text.match(/BURNOFF\s+(\d{1,2}\.\d{2})\s+\d{6}/i);
+
+  if (burnoffMatch) {
+    const [h, m] = burnoffMatch[1].split(".").map(Number);
+    flightTime = formatMinutes((h * 60) + m);
+  }
+
+  // -------------------------
+  // BLOCK TIME
+  // -------------------------
+  let blockTime = "Not found";
+  let blockMin = null;
+
+  if (/^\d{4}$/.test(dep) && /^\d{4}$/.test(arr)) {
+
+    let d = parseInt(dep.slice(0,2)) * 60 + parseInt(dep.slice(2,4));
+    let a = parseInt(arr.slice(0,2)) * 60 + parseInt(arr.slice(2,4));
+
+    if (a < d) a += 1440;
+
+    blockMin = a - d;
+    blockTime = formatMinutes(blockMin);
+  }
+
+  // -------------------------
+  // BUFFER TIME
+  // -------------------------
+  let bufferTime = "Not found";
+
+  if (blockMin !== null && burnoffMatch) {
+    const [h, m] = burnoffMatch[1].split(".").map(Number);
+    const flightMin = (h * 60) + m;
+
+    bufferTime = formatMinutes(blockMin - flightMin);
+  }
+
+  // -------------------------
+  // WEIGHTS
+  // -------------------------
+  function formatTons(val) {
+    if (!val) return "Not found";
+    return (Math.ceil(parseInt(val) / 100) / 10).toFixed(1);
+  }
+
+  const zfw = formatTons(text.match(/\bPZFW\b\s*(\d{6})/i)?.[1]);
+  const tow = formatTons(text.match(/\bPTOW\b\s*(\d{6})/i)?.[1]);
+  const ldw = formatTons(text.match(/\bPLWT\b\s*(\d{6})/i)?.[1]);
+
+  // -------------------------
+  // FUEL
+  // -------------------------
+  function fuel(label) {
+    const r = new RegExp(label + "\\s+\\d{1,2}\\.\\d{2}\\s+(\\d{6})", "i");
+    const m = text.match(r);
+    if (!m) return null;
+    return Math.ceil(parseInt(m[1]) / 100) / 10;
+  }
+
+  const burnoff = fuel("BURNOFF");
+  const contFuel = fuel("CONT");
+  const altnFuel = fuel("ALTN FUEL");
+  const altnHold = fuel("ALTN HOLD");
+  const fltPlanReq = fuel("FLT PLAN REQMT");
+  const excessFuel = fuel("EXCESS FUEL");
+  const tankFuel = fuel("FUEL IN TANKS");
+
+  function taxiFuel() {
+    const m = text.match(/\bTAXI\s*FUEL\s*(\d{6})/i);
+    if (!m) return null;
+    return Math.ceil(parseInt(m[1]) / 100) / 10;
+  }
+
+  const taxiFuelVal = taxiFuel();
+
+  let reserves = "Not found";
+  if (altnFuel !== null && altnHold !== null) {
+    reserves = (altnFuel + altnHold).toFixed(1);
+  }
+
+  let landingFuel = "Not found";
+  if (tankFuel !== null && burnoff !== null && taxiFuelVal !== null) {
+    landingFuel = (tankFuel - burnoff - taxiFuelVal).toFixed(1);
+  }
+
+  let route = "Not found";
+
+const runwayRegex = /\b[A-Z]{4}\/[A-Z0-9]{1,3}\b/g;
+
+const utcIndex = text.indexOf("UTC");
+
+if (utcIndex !== -1) {
+
+  const routeText = text.slice(utcIndex);
+
+  let slashCount = 0;
+  let chars = 0;
+
+  for (let i = 0; i < routeText.length; i++) {
+
+    const remaining = routeText.slice(i);
+
+    const match = remaining.match(/^[A-Z]{4}\/[A-Z0-9]{1,3}/);
+
+    if (match) {
+      slashCount++;
+      if (slashCount === 2) {
+        chars = i + match[0].length;
+        break;
+      }
+    }
+  }
+
+  const trimmed = chars ? routeText.slice(0, chars) : routeText;
+
+  route = trimmed
+    .replace("UTC", "")
+    .replace(/\b[A-Z]{4}\/[A-Z0-9]{1,3}\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const sidRaw = (text.match(/SID:\s*([^\n]+)/i)?.[1] || "").trim();
+
+const sidLine = sidRaw
+  ? sidRaw.split(/\s+/).slice(0, 2).join(" ")
+  : "Not found";
+
+const starRaw = text.match(/STAR:\s*([^\n]+)/i)?.[1]?.trim();
+
+const starLine = starRaw
+  ? starRaw.split(/\s+/).slice(0, 2).join(" ")
+  : "Not found";
+
+let departureWeather = "Not found";
+
+const depIdx = text.indexOf("DEPARTURE AIRPORT:");
+
+if (depIdx !== -1) {
+  const weatherText = text.slice(depIdx);
+
+  let equalCount = 0;
+  let endIndex = -1;
+
+  for (let i = 0; i < weatherText.length; i++) {
+
+    if (weatherText[i] === "=") {
+      equalCount++;
+
+      if (equalCount === 2) {
+        endIndex = i + 1;
+        break;
+      }
+    }
+  }
+  if (endIndex !== -1) {
+    departureWeather = weatherText
+      .slice("DEPARTURE AIRPORT:".length, endIndex)
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+}
+
+let destinationWeather = "Not found";
+
+const destIndex = text.indexOf("DESTINATION AIRPORT:");
+
+if (destIndex !== -1) {
+
+  const weatherText = text.slice(destIndex);
+
+  let equalCount = 0;
+  let endIndex = -1;
+
+  for (let i = 0; i < weatherText.length; i++) {
+
+    if (weatherText[i] === "=") {
+      equalCount++;
+
+      if (equalCount === 2) {
+        endIndex = i + 1;
+        break;
+      }
+    }
+  }
+
+  if (endIndex !== -1) {
+    destinationWeather = weatherText
+      .slice("DESTINATION AIRPORT:".length, endIndex)
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+}
+
+const targetSet = new Set([
+  "004","005","006","007","008","009",
+  "010","011","012","013","014","015",
+  "016","017","018","019"
+]);
+
+const tokens = text.split(/\s+/);
+
+const results = [];
+
+for (let i = 0; i < tokens.length; i++) {
+  const token = tokens[i];
+
+  if (targetSet.has(token)) {
+    results.push({
+      before: tokens[i - 9] || null,
+      match: token
+    });
+  }
+}
+
+const wordList = text.split(/\s+/);
+
+const codeList = [];
+
+for (let i = 0; i < wordList.length; i++) {
+  const item = wordList[i];
+
+  const valid =
+    item.length === 8 &&
+    item[3] === "*" &&
+    /^\d{3}$/.test(item.slice(0, 3));
+
+   if (valid) {
+    codeList.push({
+      code: item.slice(0, 4),
+      before16: wordList[i - 16] || null,
+      before17: wordList[i - 17] || null
+    });
+  }
+}
+
+const planNumber = (text.match(/Plan\s+(\d+)/i) || [])[1] || null;
+
+const altnSection = text.split("ALTN/RWY")[1] || "";
+
+const matches = [...altnSection.matchAll(/([A-Z]{4})\/\d+/g)];
+
+const a1 = matches[0] ? matches[0][1] : "N/A";
+const a2 = matches[1] ? matches[1][1] : "N/A";
+const a3 = matches[2] ? matches[2][1] : "N/A";
+const a4 = matches[3] ? matches[3][1] : "N/A";
+
+const rtowMatch = text.match(/RTOW\s*(?!\()[^\d]*(\d{6})/i);
+const rtow = rtowMatch
+  ? (Math.floor(Number(rtowMatch[1]) / 100) * 100) / 1000
+  : null;
+
+const excessWeight = rtow - tow - taxiFuelVal;
+const excessWeightRounded = Math.round(excessWeight * 10) / 10;
+
+  return {
+    headerDep,
+    headerArr,
+    flight,
+    reg,
+    apd,
+    dep,
+    arr,
+    blockTime,
+    flightTime,
+    bufferTime,
+    zfw,
+    tow,
+    ldw,
+    burnoff,
+    contFuel,
+    altnFuel,
+    altnHold,
+    fltPlanReq,
+    excessFuel,
+    tankFuel,
+    taxiFuel: taxiFuelVal,
+    reserves,
+    landingFuel,
+    route,
+    sidLine,
+    starLine,
+    destinationWeather,
+    departureWeather,
+    results,
+    codeList,
+    planNumber,
+    a1,
+    a2,
+    a3,
+    a4,
+    rtow,
+    excessWeightRounded,
+  };
+}
+
+function formatRouteTwoPerLine(routeStr) {
+  if (!routeStr) return "Not found";
+
+  const parts = routeStr.trim().split(/\s+/);
+
+  let result = [];
+
+  for (let i = 0; i < parts.length; i += 2) {
+    const first = parts[i];
+    const second = parts[i + 1] || "";
+
+    const last = result[result.length - 1];
+
+    // DCT is ALWAYS independent
+    if (first === "DCT") {
+      result.push({ first, second });
+      continue;
+    }
+
+    // merge only non-DCT consecutive duplicates
+    if (last && last.first === first) {
+      last.second = second;
+    } else {
+      result.push({ first, second });
+    }
+  }
+
+  return result
+    .map(r => `
+      <div class="row">
+        <div>${r.first}</div><div>${r.second ? r.second : ""}</div>
+      </div>
+    `)
+    .join("");
+}
+
+function formatDepartureWeather(str) {
+  if (!str || str === "Not found") return "Not found";
+
+  const eqIdx = str.indexOf("=");
+  if (eqIdx === -1) return str;
+
+  return str.slice(0, eqIdx + 1) + "<br>" + str.slice(eqIdx + 1);
+}
+
+function formatDestinationWeather(str) {
+  if (!str || str === "Not found") return "Not found";
+
+  const idx = str.indexOf("=");
+
+  if (idx === -1) return str;
+
+  return (
+    str.slice(0, idx + 1) + "<br>" + str.slice(idx + 1)
+  );
+}
+
+// -------------------------
+function render(d) {
+
+
+    const lines = d.results
+         .map(r => `${r.before || "-"}   ${r.match}`)
+         .join("<br>");
+
+    const displayLines = d.codeList
+        .map(r => `
+          <div class="row">
+            <div>${r.before16 || "-"}</div><div>${r.before17 || "-"}</div><div>${r.code}</div>
+          </div>
+        `)
+        .join("");
+
+  output.innerHTML = `
+    <div class = "container">
+        <div class="card">
+        <div class="title">Flight Overview</div>
+        <div class="grid">
+            <div>Plan:</div><div>${d.planNumber}</div>
+            <div>Flight Number:</div>
+            <div>${d.flight} (${d.headerDep} → ${d.headerArr})</div>
+
+            <div>Registration:</div><div>${d.reg}</div>
+            <div>APD:</div><div>${d.apd}</div>
+            <div>Flight Time:</div><div> ${d.flightTime}</div>
+        </div>
+        </div>
+
+        <div class="card">
+        <div class="title">SCHEDULE</div>
+        <div style="font-size:24px;margin-bottom:10px;">
+            <div> STD: ${d.dep} → STA: ${d.arr} </div>
+        </div>
+        <div class="grid">
+        <div>Block Time: </div><div>${d.blockTime}</div>
+        <div>Flight Time: </div><div>${d.flightTime}</div>
+        <div>Buffer Time: </div><div>${d.bufferTime}</div>
+        </div>
+        </div>
+
+        <div class="card">
+        <div class="title">WEIGHTS</div>
+        <div class="grid">
+            <div>ZFW:</div><div>${d.zfw}</div>
+            <div>TOW:</div><div>${d.tow}</div>
+            <div>LDW:</div><div>${d.ldw}</div>
+            <div class="break"></div><div></div>
+            <div class="break"></div><div></div>
+            <div>RTOW:</div><div>${d.rtow}</div>
+            <div>Excess Weight:</div><div>${d.excessWeightRounded}</div>
+        </div>
+        </div>
+
+        <div class="card">
+        <div class="title">FUEL</div>
+        <div class="grid">
+            <div>Burn-off:</div><div><b>${d.burnoff ?? "Not found"}</b></div>
+            <div>Contingency:</div><div>${d.contFuel ?? "Not found"}</div>
+            <div>ALTN Fuel:</div><div>${d.altnFuel ?? "Not found"}</div>
+            <div>ALTN Hold:</div><div>${d.altnHold ?? "Not found"}</div>
+            <div>Reserves:</div><div><b>${d.reserves}</b> (${d.a1})</div>
+            <div>FLT Plan Req:</div><div>${d.fltPlanReq ?? "Not found"}</div>
+            <div>Excess:</div><div>${d.excessFuel ?? "Not found"}</div>
+            <div>Fuel In Tanks:</div><div><b>${d.tankFuel ?? "Not found"}</b></div>
+            <div>Taxi Fuel:</div><div>${d.taxiFuel ?? "Not found"}</div>
+            <div>Landing Fuel:</div><div>${d.landingFuel}</div>
+        </div>
+        </div>
+
+        <div class="card">
+            <div class="title">WEATHER</div>
+
+            <div class="grid">
+                <div>Departure Weather:</div>
+                <div>${formatDepartureWeather(d.departureWeather)}</div>
+                
+                <div>Destination Weather:</div>
+                <div>${formatDestinationWeather(d.destinationWeather)}</div>
+            </div>
+            <br>
+            <br>
+            <div class="title">VWS</div>
+                <div style="font-size:18px; line-height:1.6;">
+                    ${lines}
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="title">HIGH GROUND</div>
+                <div style="font-size:18px; line-height:1.6;">
+                    ${displayLines}
+                </div>
+        </div
+
+        <!-- NEW ROUTE INFORMATION SECTION -->
+        <div class="card">
+            <div class="title">ROUTE INFORMATION</div>
+
+            <div class="grid">
+                <div>Departure:</div><div>${d.sidLine}</div>
+                <div>Destination:</div><div>${d.starLine}</div>
+            </div>
+            <br>
+            <br>
+            <div style="margin-top:10px;">
+                <div class="title">Airway Routing</div>
+                <div style="font-size:18px; color:#333; line-height:1.6;">
+                    ${formatRouteTwoPerLine(d.route)}
+                </div>
+            </div>
+        </div>
+        
+        <div class="card">
+        <div class="grid">
+          <div class="title">ALTERNATES</div>
+          <br>
+           <div>${d.a1}</div> <br>
+           <div>${d.a2}</div> <br>
+           <div>${d.a3}</div> <br>
+           <div>${d.a4}</div> <br>
+        </div>
+        </div>
+       
+    </div>
+    
+  `;
+}
+
+
+
+
+// -------------------------
+async function handleFile(file) {
+  if (!file) return;
+  output.innerHTML = "<div class='card'>Processing...</div>";
+  const data = await extractData(file);
+  render(data);
+}
+
+fileInput.addEventListener("change", e => handleFile(e.target.files[0]));
+
+dropZone.addEventListener("dragover", e => {
+  e.preventDefault();
+  dropZone.classList.add("dragover");
+});
+
+dropZone.addEventListener("dragleave", () => {
+  dropZone.classList.remove("dragover");
+});
+
+dropZone.addEventListener("drop", e => {
+  e.preventDefault();
+  dropZone.classList.remove("dragover");
+  handleFile(e.dataTransfer.files[0]);
+});
+</script>
+
+</body>
+</html>
